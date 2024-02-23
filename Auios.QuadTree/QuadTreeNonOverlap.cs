@@ -2,6 +2,7 @@
 // Licensed under the MIT License
 
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -13,25 +14,24 @@ namespace Auios.QuadTree
     /// Allows to efficiently find objects spatially relative to each other.
     /// </summary>
     /// <typeparam name="T">The type of elements in the QuadTree.</typeparam>
-    public sealed class QuadTree<T, TBoundProvider>
-        where T : IEquatable<T>
+    public sealed class QuadTreeNonOverlap<T, TBoundProvider>
         where TBoundProvider : struct, IQuadTreeObjectBounds<T>
     {
         /// <summary>The area of this quadrant.</summary>
         public QuadTreeRect Area;
         /// <summary>Objects in this quadrant.</summary>
-        private readonly HashSet<T> _objects;
+        private readonly List<T> _objects;
         /// <summary>If this quadrant has sub quadrants. Objects only exist on quadrants without children.</summary>
         private bool _hasChildren;
 
         /// <summary>Top left quadrant.</summary>
-        private QuadTree<T, TBoundProvider> quad_TL;
+        private QuadTreeNonOverlap<T, TBoundProvider> quad_TL;
         /// <summary>Top right quadrant.</summary>
-        private QuadTree<T, TBoundProvider> quad_TR;
+        private QuadTreeNonOverlap<T, TBoundProvider> quad_TR;
         /// <summary>Bottom left quadrant.</summary>
-        private QuadTree<T, TBoundProvider> quad_BL;
+        private QuadTreeNonOverlap<T, TBoundProvider> quad_BL;
         /// <summary>Bottom right quadrant.</summary>
-        private QuadTree<T, TBoundProvider> quad_BR;
+        private QuadTreeNonOverlap<T, TBoundProvider> quad_BR;
 
         /// <summary>Gets the current depth level of this quadrant.</summary>
         public int CurrentLevel { get; }
@@ -48,11 +48,11 @@ namespace Auios.QuadTree
         /// <param name="maxObjects">The max number of elements in one rectangle.</param>
         /// <param name="maxLevel">The max depth level.</param>
         /// <param name="currentLevel">The current depth level. Leave default if this is the root QuadTree.</param>
-        public QuadTree(double x, double y, double width, double height,
+        public QuadTreeNonOverlap(double x, double y, double width, double height,
             int maxObjects = 10, int maxLevel = 5, int currentLevel = 0)
         {
             Area = new QuadTreeRect(x, y, width, height);
-            _objects = new HashSet<T>();
+            _objects = [];
 
             CurrentLevel = currentLevel;
             MaxLevel = maxLevel;
@@ -67,13 +67,13 @@ namespace Auios.QuadTree
         /// <param name="maxObjects">The max number of elements in one rectangle.</param>
         /// <param name="maxLevel">The max depth level.</param>
         /// <param name="currentLevel">The current depth level. Leave default if this is the root QuadTree.</param>
-        public QuadTree(double width, double height, int maxObjects = 10, int maxLevel = 5, int currentLevel = 0)
+        public QuadTreeNonOverlap(double width, double height, int maxObjects = 10, int maxLevel = 5, int currentLevel = 0)
             : this(0, 0, width, height, maxObjects, maxLevel, currentLevel) { }
 
         private bool IsObjectInside(T obj)
         {
-            if (default(TBoundProvider).GetTop(obj) > Area.Bottom) return false;
-            if (default(TBoundProvider).GetBottom(obj) < Area.Top) return false;
+            if (default(TBoundProvider).GetTop(obj) < Area.Bottom) return false;
+            if (default(TBoundProvider).GetBottom(obj) > Area.Top) return false;
             if (default(TBoundProvider).GetLeft(obj) > Area.Right) return false;
             if (default(TBoundProvider).GetRight(obj) < Area.Left) return false;
             return true;
@@ -205,13 +205,22 @@ namespace Auios.QuadTree
         /// <summary>Searches for objects in any quadrants which the passed region overlaps, but not specifically within that region.</summary>
         /// <param name="rect">The search region.</param>
         /// <returns>an array of objects.</returns>
-        public HashSet<T> FindObjects(QuadTreeRect rect)
+        public List<T> FindObjects(QuadTreeRect rect)
         {
-            var foundObjects = new HashSet<T>();
+            var foundObjects = new List<T>();
             FindObjectsInternal(rect, foundObjects);
             return foundObjects;
         }
-        private void FindObjectsInternal(QuadTreeRect rect, HashSet<T> list)
+        public List<T> FindObjects(T bounds)
+        {
+            return FindObjects(new QuadTreeRect(
+                default(TBoundProvider).GetLeft(bounds),
+                default(TBoundProvider).GetTop(bounds),
+                default(TBoundProvider).GetRight(bounds),
+                default(TBoundProvider).GetBottom(bounds)
+                ));
+        }
+        private void FindObjectsInternal(QuadTreeRect rect, List<T> list)
         {
             if (_hasChildren)
             {
@@ -224,18 +233,81 @@ namespace Auios.QuadTree
             {
                 if (IsOverlapping(rect))
                 {
-                    list.UnionWith(_objects);
+                    list.AddRange(_objects);
                 }
             }
         }
-        public HashSet<T> FindObjects(T bounds)
+
+        public ObjectCollection FindObjectsForEnumeration(QuadTreeRect rect)
         {
-            return FindObjects(new QuadTreeRect(
-                default(TBoundProvider).GetLeft(bounds),
-                default(TBoundProvider).GetTop(bounds),
-                default(TBoundProvider).GetRight(bounds),
-                default(TBoundProvider).GetBottom(bounds)
-                ));
+            var foundObjects = new List<QuadTreeNonOverlap<T, TBoundProvider>>();
+            FindObjectsForEnumerationInternal(rect, foundObjects);
+            return new(foundObjects);
+        }
+        private void FindObjectsForEnumerationInternal(QuadTreeRect rect, List<QuadTreeNonOverlap<T, TBoundProvider>> list)
+        {
+            if (_hasChildren)
+            {
+                quad_TL.FindObjectsForEnumerationInternal(rect, list);
+                quad_TR.FindObjectsForEnumerationInternal(rect, list);
+                quad_BL.FindObjectsForEnumerationInternal(rect, list);
+                quad_BR.FindObjectsForEnumerationInternal(rect, list);
+            }
+            else if (IsOverlapping(rect))
+            {
+                list.Add(this);
+            }
+        }
+        public readonly struct ObjectCollection(List<QuadTreeNonOverlap<T, TBoundProvider>> list)
+            : IEnumerable<T>
+        {
+            public ObjectCollectionEnumerator GetEnumerator() => new(list);
+            IEnumerator<T> IEnumerable<T>.GetEnumerator() => GetEnumerator();
+            IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+        }
+        public struct ObjectCollectionEnumerator(List<QuadTreeNonOverlap<T, TBoundProvider>> list)
+            : IEnumerator<T>
+        {
+            private int ListIndex = 0;
+            private int InListIndex = -1;
+
+            private T current = default;
+
+            private readonly List<QuadTreeNonOverlap<T, TBoundProvider>> _list = list;
+            readonly object IEnumerator.Current => Current;
+            public readonly T Current => current;
+
+            public readonly void Dispose()
+            {
+            }
+
+            public void Reset()
+            {
+                ListIndex = 0;
+                InListIndex = -1;
+            }
+            public bool MoveNext()
+            {
+                for (; ; )
+                {
+                    if (ListIndex >= _list.Count)
+                    {
+                        return false;
+                    }
+
+                    var l = _list[ListIndex]._objects;
+                    ++InListIndex;
+                    if (InListIndex >= l.Count)
+                    {
+                        InListIndex = -1;
+                        ++ListIndex;
+                        continue;
+                    }
+
+                    current = l[InListIndex];
+                    return true;
+                }
+            }
         }
     }
 }
